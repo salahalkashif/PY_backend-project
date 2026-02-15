@@ -7,7 +7,7 @@ load_dotenv()
 
 
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = "postgresql://admin:admin@localhost:5433/testdb"
 
 
 if not DATABASE_URL:

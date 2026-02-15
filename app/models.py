@@ -8,3 +8,4 @@ class User(Base):
     name = Column(String, nullable=False)
     age = Column(Integer, nullable=False)
 
+
