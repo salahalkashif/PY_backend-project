@@ -133,20 +133,18 @@ def read_users_me(current_user: User = Depends(get_current_user)):
 #Chat history
 def call_llm(chat_history: list):
 
-    # آخر رسالة (الرسالة الجديدة)
     last_user_message = chat_history[-1]["content"]
 
-    # باقي المحادثة السابقة
     previous_chat = [
         {
             "role": msg["role"],
-            "message": msg["content"]  # هنا التحويل المهم
+            "message": msg["content"]
         }
         for msg in chat_history[:-1]
     ]
 
     response = co.chat(
-        model="command-r-08-2024",   # غيرها لو Cohere قالك الموديل اتشال
+        model="command-r-08-2024",
         message=last_user_message,
         chat_history=previous_chat
     )
@@ -166,13 +164,11 @@ def chat(request: ChatRequest,
          current_user: User = Depends(get_current_user),
          db: Session = Depends(get_db)):
 
-    # 1️⃣ هات كل الرسائل القديمة للمستخدم
     previous_messages = db.query(Message)\
         .filter(Message.user_id == current_user.id)\
         .order_by(Message.created_at)\
         .all()
 
-    # 2️⃣ ابنِ chat_history بالصيغة اللي Cohere عايزها
     chat_history = []
 
     for msg in previous_messages:
@@ -187,16 +183,13 @@ def chat(request: ChatRequest,
                 "content": msg.content
             })
 
-    # 3️⃣ ضيف رسالة المستخدم الجديدة
     chat_history.append({
         "role": "USER",
         "content": request.message
     })
 
-    # 4️⃣ نادِ الـ LLM
     ai_response = call_llm(chat_history)
 
-    # 5️⃣ خزّن رسالة المستخدم
     user_msg = Message(
         user_id=current_user.id,
         role="user",
@@ -204,7 +197,6 @@ def chat(request: ChatRequest,
     )
     db.add(user_msg)
 
-    # 6️⃣ خزّن رد الـ AI
     ai_msg = Message(
         user_id=current_user.id,
         role="assistant",
