@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional
 from uuid import UUID
+from datetime import datetime
 
 
 class UserCreate(BaseModel):
@@ -32,3 +33,30 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+
+
+class MessageOut(BaseModel):
+    id: int
+    role: str
+    content: str
+    created_at: datetime
+
+
+class ConversationOut(BaseModel):
+    conversation_id: UUID
+    created_at: datetime
+    messages: list[MessageOut]
+
+
+class UserChatsResponse(BaseModel):
+    conversations: list[ConversationOut]
+
+
+class EmbeddingCreateRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+
+
+class EmbeddingCreateResponse(BaseModel):
+    id: UUID
+    content: str
+    embedding_dimensions: int
