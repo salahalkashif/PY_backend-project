@@ -1,4 +1,7 @@
 from pydantic import BaseModel, Field
+from typing import Optional
+from uuid import UUID
+
 
 class UserCreate(BaseModel):
     name: str
@@ -21,8 +24,10 @@ class Token(BaseModel):
 
 
 #for llm
+
 class ChatRequest(BaseModel):
     message: str
+    conversation_id: Optional[UUID] = None
 
 
 class ChatResponse(BaseModel):

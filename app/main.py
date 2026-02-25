@@ -7,7 +7,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 import os
 import cohere
-from app.models import Message
+from app.models import Message, Conversation
 from app.schemas import ChatRequest, ChatResponse
 from app.database import SessionLocal, engine
 from app.models import Base, User
@@ -160,45 +160,64 @@ def call_llm(chat_history: list):
 
 #Chat endpoints
 @app.post("/chat")
-def chat(request: ChatRequest,
-         current_user: User = Depends(get_current_user),
-         db: Session = Depends(get_db)):
+def chat(
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="message is required")
+
+    conversation = None
+
+    if request.conversation_id:
+        conversation = db.query(Conversation).filter(
+            Conversation.id == request.conversation_id,
+            Conversation.user_id == current_user.id
+        ).first()
+
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+    else:
+        conversation = Conversation(user_id=current_user.id)
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
 
     previous_messages = db.query(Message)\
-        .filter(Message.user_id == current_user.id)\
+        .filter(Message.conversation_id == conversation.id)\
         .order_by(Message.created_at)\
         .all()
 
     chat_history = []
 
     for msg in previous_messages:
-        if msg.role == "user":
-            chat_history.append({
-                "role": "USER",
-                "content": msg.content
-            })
-        else:
-            chat_history.append({
-                "role": "CHATBOT",
-                "content": msg.content
-            })
+        chat_history.append({
+            "role": "USER" if msg.role == "user" else "CHATBOT",
+            "content": msg.content
+        })
 
     chat_history.append({
         "role": "USER",
-        "content": request.message
+        "content": message
     })
+
 
     ai_response = call_llm(chat_history)
 
+
     user_msg = Message(
-        user_id=current_user.id,
+        conversation_id=conversation.id,
         role="user",
-        content=request.message
+        content=message
     )
     db.add(user_msg)
 
+
     ai_msg = Message(
-        user_id=current_user.id,
+        conversation_id=conversation.id,
         role="assistant",
         content=ai_response
     )
@@ -206,4 +225,39 @@ def chat(request: ChatRequest,
 
     db.commit()
 
-    return {"response": ai_response}
+    return {
+        "conversation_id": str(conversation.id),
+        "response": ai_response
+    }
+
+
+@app.get("/chats")
+def get_user_chats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    conversations = db.query(Conversation).filter(
+        Conversation.user_id == current_user.id
+    ).order_by(Conversation.created_at).all()
+
+    result = []
+    for conversation in conversations:
+        messages = db.query(Message).filter(
+            Message.conversation_id == conversation.id
+        ).order_by(Message.created_at).all()
+
+        result.append({
+            "conversation_id": str(conversation.id),
+            "created_at": conversation.created_at,
+            "messages": [
+                {
+                    "id": msg.id,
+                    "role": msg.role,
+                    "content": msg.content,
+                    "created_at": msg.created_at
+                }
+                for msg in messages
+            ]
+        })
+
+    return {"conversations": result}
