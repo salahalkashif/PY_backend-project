@@ -2,16 +2,23 @@ import os
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import os
 import cohere
-from app.models import Message, Conversation
-from app.schemas import ChatRequest, ChatResponse
+from app.models import Message, Conversation, Embedding, EMBEDDING_DIMENSIONS
+from app.schemas import ChatRequest, ChatResponse, UserChatsResponse
 from app.database import SessionLocal, engine
 from app.models import Base, User
-from app.schemas import UserCreate, UserResponse, Token
+from app.schemas import (
+    UserCreate,
+    UserResponse,
+    Token,
+    EmbeddingCreateRequest,
+    EmbeddingCreateResponse,
+)
 from dotenv import load_dotenv
 load_dotenv()
 co = cohere.Client(os.getenv("COHERE_API_KEY"))
@@ -25,6 +32,8 @@ SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
+with engine.begin() as conn:
+    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -231,7 +240,8 @@ def chat(
     }
 
 
-@app.get("/chats")
+@app.get("/users/me/chats", response_model=UserChatsResponse)
+@app.get("/chats", response_model=UserChatsResponse)
 def get_user_chats(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -247,7 +257,7 @@ def get_user_chats(
         ).order_by(Message.created_at).all()
 
         result.append({
-            "conversation_id": str(conversation.id),
+            "conversation_id": conversation.id,
             "created_at": conversation.created_at,
             "messages": [
                 {
@@ -261,3 +271,67 @@ def get_user_chats(
         })
 
     return {"conversations": result}
+
+
+def get_text_embedding(content: str) -> list[float]:
+    payload = {
+        "model": "embed-english-v3.0",
+        "texts": [content],
+        "input_type": "search_document",
+        "embedding_types": ["float"],
+        "output_dimension": EMBEDDING_DIMENSIONS,
+    }
+
+    try:
+        response = co.embed(**payload)
+    except TypeError:
+        payload.pop("output_dimension", None)
+        response = co.embed(**payload)
+
+    embeddings = getattr(response, "embeddings", None)
+    if embeddings is None:
+        raise RuntimeError("Cohere response did not include embeddings")
+
+    if isinstance(embeddings, list):
+        vector = embeddings[0]
+    elif hasattr(embeddings, "float"):
+        vector = embeddings.float[0]
+    elif isinstance(embeddings, dict) and "float" in embeddings:
+        vector = embeddings["float"][0]
+    else:
+        raise RuntimeError("Unsupported embedding response format")
+
+    return [float(v) for v in vector]
+
+
+@app.post("/embeddings", response_model=EmbeddingCreateResponse, status_code=status.HTTP_201_CREATED)
+def create_embedding(
+    request: EmbeddingCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    content = request.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="content is required")
+
+    try:
+        vector = get_text_embedding(content)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to generate embedding: {exc}")
+
+    if len(vector) != EMBEDDING_DIMENSIONS:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected embedding size {len(vector)}; expected {EMBEDDING_DIMENSIONS}",
+        )
+
+    new_embedding = Embedding(content=content, embedding=vector)
+    db.add(new_embedding)
+    db.commit()
+    db.refresh(new_embedding)
+
+    return {
+        "id": new_embedding.id,
+        "content": new_embedding.content,
+        "embedding_dimensions": len(vector),
+    }
