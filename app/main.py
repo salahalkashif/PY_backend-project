@@ -1,23 +1,40 @@
-from app.database import engine, SessionLocal
-from app.models import Base, User
-from app.schemas import UserCreate, UserResponse
-from fastapi import FastAPI, Depends, HTTPException
+import os
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+import os
+import cohere
+from app.models import Message
+from app.schemas import ChatRequest, ChatResponse
+from app.database import SessionLocal, engine
+from app.models import Base, User
+from app.schemas import UserCreate, UserResponse, Token
+from dotenv import load_dotenv
+load_dotenv()
+co = cohere.Client(os.getenv("COHERE_API_KEY"))
+
 
 # =========================
-# FastAPI App
+# Settings
 # =========================
 
-app = FastAPI()
-
-# =========================
-# Create Tables
-# =========================
+SECRET_KEY = "supersecretkey"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 Base.metadata.create_all(bind=engine)
 
+app = FastAPI()
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+
 # =========================
-# Database Dependency
+# Dependency
 # =========================
 
 def get_db():
@@ -27,55 +44,166 @@ def get_db():
     finally:
         db.close()
 
-# =========================
-# POST - Insert User
-# =========================
-
-@app.post("/users", response_model=UserResponse)
-def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = User(name=user.name, age=user.age)
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
 
 # =========================
-# GET - Retrieve User by ID
+# Helper Functions
 # =========================
 
-@app.get("/users/{user_id}", response_model=UserResponse)
-def get_user(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid authentication",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = db.query(User).filter(User.name == username).first()
+    if user is None:
+        raise credentials_exception
     return user
 
+
 # =========================
-# PUT - Update User
+# Register
 # =========================
 
-@app.put("/users/{user_id}", response_model=UserResponse)
-def update_user(user_id: int, user: UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if not db_user:
-        raise HTTPException(status_code=404, detail="User not found")
+@app.post("/register", response_model=UserResponse)
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    existing_user = db.query(User).filter(User.name == user.name).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User already exists")
 
-    db_user.name = user.name
-    db_user.age = user.age
+    hashed_password = get_password_hash(user.password)
+
+    new_user = User(name=user.name, password=hashed_password)
+    db.add(new_user)
     db.commit()
-    db.refresh(db_user)
-    return db_user
+    db.refresh(new_user)
+
+    return new_user
+
 
 # =========================
-# DELETE - Delete User
+# Login
 # =========================
 
-@app.delete("/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if not db_user:
-        raise HTTPException(status_code=404, detail="User not found")
+@app.post("/login", response_model=Token)
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.name == form_data.username).first()
 
-    db.delete(db_user)
+    if not user or not verify_password(form_data.password, user.password):
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+
+    access_token = create_access_token(data={"sub": user.name})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+# =========================
+# Protected Example Endpoint
+# =========================
+
+@app.get("/users/me", response_model=UserResponse)
+def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+
+
+#Chat history
+def call_llm(chat_history: list):
+
+    last_user_message = chat_history[-1]["content"]
+
+    previous_chat = [
+        {
+            "role": msg["role"],
+            "message": msg["content"]
+        }
+        for msg in chat_history[:-1]
+    ]
+
+    response = co.chat(
+        model="command-r-08-2024",
+        message=last_user_message,
+        chat_history=previous_chat
+    )
+
+    return response.text
+
+
+
+
+
+
+
+
+#Chat endpoints
+@app.post("/chat")
+def chat(request: ChatRequest,
+         current_user: User = Depends(get_current_user),
+         db: Session = Depends(get_db)):
+
+    previous_messages = db.query(Message)\
+        .filter(Message.user_id == current_user.id)\
+        .order_by(Message.created_at)\
+        .all()
+
+    chat_history = []
+
+    for msg in previous_messages:
+        if msg.role == "user":
+            chat_history.append({
+                "role": "USER",
+                "content": msg.content
+            })
+        else:
+            chat_history.append({
+                "role": "CHATBOT",
+                "content": msg.content
+            })
+
+    chat_history.append({
+        "role": "USER",
+        "content": request.message
+    })
+
+    ai_response = call_llm(chat_history)
+
+    user_msg = Message(
+        user_id=current_user.id,
+        role="user",
+        content=request.message
+    )
+    db.add(user_msg)
+
+    ai_msg = Message(
+        user_id=current_user.id,
+        role="assistant",
+        content=ai_response
+    )
+    db.add(ai_msg)
+
     db.commit()
-    return {"detail": "User deleted successfully"}
+
+    return {"response": ai_response}

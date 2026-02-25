@@ -7,7 +7,7 @@ load_dotenv()
 
 
 
-DATABASE_URL = "postgresql://admin:admin@localhost:5433/testdb"
+DATABASE_URL = "postgresql://postgres.hqjbhdsiaewmnmemffzv:kQi1HoSfvvUwmarn@aws-1-eu-north-1.pooler.supabase.com:6543/postgres"
 
 
 if not DATABASE_URL:
