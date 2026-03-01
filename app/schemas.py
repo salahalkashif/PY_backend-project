@@ -60,3 +60,8 @@ class EmbeddingCreateResponse(BaseModel):
     id: UUID
     content: str
     embedding_dimensions: int
+
+
+class VideoIngestResponse(BaseModel):
+    video_id: UUID
+    status: str

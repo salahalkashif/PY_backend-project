@@ -1,15 +1,14 @@
 import os
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-import os
 import cohere
-from app.models import Message, Conversation, Embedding, EMBEDDING_DIMENSIONS
-from app.schemas import ChatRequest, ChatResponse, UserChatsResponse
+from app.models import Message, Conversation, Embedding, EMBEDDING_DIMENSIONS, Video
+from app.schemas import ChatRequest, ChatResponse, UserChatsResponse, VideoIngestResponse
 from app.database import SessionLocal, engine
 from app.models import Base, User
 from app.schemas import (
@@ -18,6 +17,12 @@ from app.schemas import (
     Token,
     EmbeddingCreateRequest,
     EmbeddingCreateResponse,
+)
+from app.video_processing import (
+    is_valid_video_url,
+    process_video_pipeline,
+    save_uploaded_video,
+    validate_video_upload,
 )
 from dotenv import load_dotenv
 load_dotenv()
@@ -137,6 +142,53 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
+
+
+#Video ingestion
+@app.post("/videos", response_model=VideoIngestResponse, status_code=status.HTTP_202_ACCEPTED)
+async def ingest_video(
+    background_tasks: BackgroundTasks,
+    video_file: UploadFile | None = File(default=None),
+    video_url: str | None = Form(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ = current_user
+    if video_file and video_url:
+        raise HTTPException(status_code=422, detail="Provide either video_file or video_url, not both")
+    if not video_file and not video_url:
+        raise HTTPException(status_code=422, detail="Either video_file or video_url is required")
+    if video_url and not is_valid_video_url(video_url):
+        raise HTTPException(status_code=422, detail="Invalid video_url format")
+    if video_file:
+        validate_video_upload(video_file)
+
+    video = Video(
+        original_url=video_url,
+        status="processing",
+    )
+    db.add(video)
+    db.commit()
+    db.refresh(video)
+
+    if video_file:
+        local_path, title = save_uploaded_video(video_file=video_file, video_id=video.id)
+        video.local_path = local_path
+        video.title = title
+        db.commit()
+        db.refresh(video)
+
+    background_tasks.add_task(
+        process_video_pipeline,
+        video_id=video.id,
+        db_session_factory=SessionLocal,
+        source_type="upload" if video_file else "url",
+        upload_path=video.local_path,
+        video_url=video_url,
+        llm_fn=call_llm,
+    )
+
+    return {"video_id": video.id, "status": "processing"}
 
 
 #Chat history
